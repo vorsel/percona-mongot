@@ -120,7 +120,25 @@ get_sources(){
     rm -fr debian rpm ${PRODUCT}-${VERSION}
 
     mv ${PRODUCT} ${PRODUCT}-${VERSION}
-    if [ -f ${CURDIR}/mongot.patch ]; then
+    # Apply source patches before tarball is created. Two formats are supported:
+    #   1. ${CURDIR}/patches/*.patch  — preferred. Applied in lex order, each as
+    #      a standalone `git apply`. Use this for multi-patch builds.
+    #   2. ${CURDIR}/mongot.patch     — legacy single-file path; kept for
+    #      backward compatibility with the upstream packaging workflow.
+    # `__VERSION__` is substituted in patch files before apply so they can
+    # reference the build version without hard-coding it.
+    if [ -d "${CURDIR}/patches" ] && ls "${CURDIR}/patches"/*.patch >/dev/null 2>&1; then
+        pushd ${PRODUCT}-${VERSION}
+            for patch_file in $(ls "${CURDIR}/patches"/*.patch | sort); do
+                patch_name=$(basename "${patch_file}")
+                echo "Applying patch: ${patch_name}"
+                cp "${patch_file}" "./${patch_name}"
+                sed -i "s:__VERSION__:${VERSION}:g" "./${patch_name}"
+                git apply "./${patch_name}" || { echo "Failed to apply ${patch_name}"; exit 1; }
+                rm "./${patch_name}"
+            done
+        popd
+    elif [ -f ${CURDIR}/mongot.patch ]; then
         pushd ${PRODUCT}-${VERSION}
             cp ${CURDIR}/mongot.patch .
             sed -i "s:__VERSION__:${VERSION}:g" ./mongot.patch
