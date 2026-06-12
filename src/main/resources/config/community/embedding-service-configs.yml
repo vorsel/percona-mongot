@@ -68,3 +68,51 @@ configs:
         initialRetryWaitMs: 200
         maxRetryWaitMs: 10000
         jitter: 0.1
+
+  # ---------------------------------------------------------------------------
+  # OpenAI-compatible models (OpenAI /v1/embeddings protocol).
+  #
+  # These route to any server speaking the OpenAI embeddings API: a local engine
+  # (Ollama, vLLM, HF TEI) or a cloud endpoint. The default providerEndpoint
+  # below targets a local Ollama instance. Set it per-model here (each engine has
+  # its own URL); the global `providerEndpoint` in the community embedding config
+  # applies to VOYAGE models only and does NOT affect these entries.
+  #
+  # - No API key is sent unless `credentials.apiKey` is set (keyless local).
+  # - Day-1 returns float vectors only.
+  # - `outputDimensions` MUST match the model's native dimension: it sizes the
+  #   auto-embed index (numDimensions). It is NOT forwarded as the OpenAI
+  #   `dimensions` request field (local engines serve a fixed native dimension
+  #   and reject it), so it must equal what the model actually returns.
+  # ---------------------------------------------------------------------------
+  - modelName: bge-m3
+    embeddingProvider: OPENAI_COMPAT
+    config:
+      providerEndpoint: http://localhost:11434/v1/embeddings
+      modelConfig:
+        batchSize: 96
+        batchTokenLimit: 120000
+        outputDimensions: 1024
+        quantization: float
+      errorHandlingConfig:
+        maxRetries: 10
+        initialRetryWaitMs: 200
+        maxRetryWaitMs: 10000
+        jitter: 0.1
+      credentials: {}
+
+  - modelName: nomic-embed-text
+    embeddingProvider: OPENAI_COMPAT
+    config:
+      providerEndpoint: http://localhost:11434/v1/embeddings
+      modelConfig:
+        batchSize: 96
+        batchTokenLimit: 120000
+        outputDimensions: 768
+        quantization: float
+      errorHandlingConfig:
+        maxRetries: 10
+        initialRetryWaitMs: 200
+        maxRetryWaitMs: 10000
+        jitter: 0.1
+      credentials: {}

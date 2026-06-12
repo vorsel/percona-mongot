@@ -114,7 +114,10 @@ public class EmbeddingServiceConfig implements DocumentEncodable {
   public enum EmbeddingProvider {
     AWS_BEDROCK,
     COHERE,
-    VOYAGE
+    VOYAGE,
+    // Any server speaking the OpenAI /v1/embeddings protocol (OpenAI, Ollama, vLLM, HF TEI,
+    // Together, ...). Endpoint is configured via providerEndpoint; API key is optional.
+    OPENAI_COMPAT
   }
 
   public enum ServiceTier {
@@ -513,6 +516,16 @@ public class EmbeddingServiceConfig implements DocumentEncodable {
     int getBatchTokenLimit();
 
     int getOutputDimensions();
+
+    /**
+     * The configured output dimension, if any. Unlike {@link #getOutputDimensions()} this does not
+     * substitute a default, so callers (e.g. auto-embed index resolution) can detect when the model
+     * does not declare a dimension and fail explicitly instead of silently picking a wrong size.
+     */
+    Optional<Integer> getConfiguredOutputDimensions();
+
+    /** The configured provider-side quantization, if any. */
+    Optional<VectorAutoEmbedQuantization> getConfiguredQuantization();
   }
 
   public static class VoyageModelConfig implements ModelConfig {
@@ -583,6 +596,16 @@ public class EmbeddingServiceConfig implements DocumentEncodable {
     @Override
     public int getOutputDimensions() {
       return this.outputDimensions.orElse(1024);
+    }
+
+    @Override
+    public Optional<Integer> getConfiguredOutputDimensions() {
+      return this.outputDimensions;
+    }
+
+    @Override
+    public Optional<VectorAutoEmbedQuantization> getConfiguredQuantization() {
+      return this.quantization;
     }
 
     @Override
@@ -680,6 +703,119 @@ public class EmbeddingServiceConfig implements DocumentEncodable {
     }
   }
 
+  /**
+   * Model config for the {@link EmbeddingProvider#OPENAI_COMPAT} provider. Mirrors {@link
+   * VoyageModelConfig} but drops Voyage-only knobs (truncation, modality). {@code outputDimensions}
+   * is only forwarded to the server as the OpenAI {@code dimensions} request field when explicitly
+   * set, since most local engines (Ollama, TEI) serve a fixed native dimension and reject it.
+   */
+  public static class OpenAiModelConfig implements ModelConfig {
+    public final Optional<Integer> outputDimensions;
+    public final Optional<Integer> batchSize;
+    public final Optional<Integer> batchTokenLimit;
+    public final Optional<VectorAutoEmbedQuantization> quantization;
+
+    public OpenAiModelConfig(
+        Optional<Integer> outputDimensions,
+        Optional<Integer> batchSize,
+        Optional<Integer> batchTokenLimit,
+        Optional<VectorAutoEmbedQuantization> quantization) {
+      this.outputDimensions = outputDimensions;
+      this.batchSize = batchSize;
+      this.batchTokenLimit = batchTokenLimit;
+      this.quantization = quantization;
+    }
+
+    @Override
+    public EmbeddingProvider getModelProvider() {
+      return EmbeddingProvider.OPENAI_COMPAT;
+    }
+
+    @Override
+    public int getBatchSize() {
+      // OpenAI accepts up to 2048 inputs per request; local engines are typically far smaller, so
+      // pick a conservative default and let the config raise it.
+      return this.batchSize.orElse(96);
+    }
+
+    @Override
+    public int getBatchTokenLimit() {
+      return this.batchTokenLimit.orElse(120_000);
+    }
+
+    @Override
+    public int getOutputDimensions() {
+      return this.outputDimensions.orElse(1024);
+    }
+
+    @Override
+    public Optional<Integer> getConfiguredOutputDimensions() {
+      return this.outputDimensions;
+    }
+
+    @Override
+    public Optional<VectorAutoEmbedQuantization> getConfiguredQuantization() {
+      return this.quantization;
+    }
+
+    @Override
+    public BsonDocument toBson() {
+      return BsonDocumentBuilder.builder()
+          .field(VoyageModelConfig.Fields.OUTPUT_DIMENSIONS, this.outputDimensions)
+          .field(VoyageModelConfig.Fields.BATCH_SIZE, this.batchSize)
+          .field(VoyageModelConfig.Fields.BATCH_TOKEN_LIMIT, this.batchTokenLimit)
+          .field(
+              VoyageModelConfig.Fields.QUANTIZATION,
+              this.quantization.map(VectorAutoEmbedQuantization::getName))
+          .build();
+    }
+
+    public static OpenAiModelConfig fromBson(DocumentParser parser) throws BsonParseException {
+      return new OpenAiModelConfig(
+          parser.getField(VoyageModelConfig.Fields.OUTPUT_DIMENSIONS).unwrap(),
+          parser.getField(VoyageModelConfig.Fields.BATCH_SIZE).unwrap(),
+          parser.getField(VoyageModelConfig.Fields.BATCH_TOKEN_LIMIT).unwrap(),
+          parseQuantization(parser));
+    }
+
+    private static Optional<VectorAutoEmbedQuantization> parseQuantization(DocumentParser parser)
+        throws BsonParseException {
+      Optional<String> quantization = parser.getField(VoyageModelConfig.Fields.QUANTIZATION).unwrap();
+      if (quantization.isEmpty()) {
+        return Optional.empty();
+      }
+      Optional<VectorAutoEmbedQuantization> parsed =
+          VectorAutoEmbedQuantization.fromName(quantization.get());
+      return parsed.isPresent()
+          ? parsed
+          : parser.getContext().handleSemanticError("invalid quantization value");
+    }
+
+    @Override
+    public boolean equals(Object o) {
+      if (this == o) {
+        return true;
+      }
+      if (o == null || getClass() != o.getClass()) {
+        return false;
+      }
+      OpenAiModelConfig that = (OpenAiModelConfig) o;
+      return Objects.equals(this.outputDimensions.orElse(null), that.outputDimensions.orElse(null))
+          && Objects.equals(this.batchSize.orElse(null), that.batchSize.orElse(null))
+          && Objects.equals(this.batchTokenLimit.orElse(null), that.batchTokenLimit.orElse(null))
+          && Objects.equals(this.quantization.orElse(null), that.quantization.orElse(null));
+    }
+
+    @Override
+    public int hashCode() {
+      return Objects.hash(
+          this.outputDimensions.orElse(null),
+          this.batchSize.orElse(null),
+          this.batchTokenLimit.orElse(null),
+          this.quantization.orElse(null));
+    }
+  }
+
   public interface EmbeddingCredentials extends DocumentEncodable {
     EmbeddingProvider getCredentialProvider();
 
@@ -761,6 +897,75 @@ public class EmbeddingServiceConfig implements DocumentEncodable {
     @Override
     public int hashCode() {
       return Objects.hash(this.apiToken, this.provider);
+    }
+  }
+
+  /**
+   * Credentials for the {@link EmbeddingProvider#OPENAI_COMPAT} provider. The API key is optional:
+   * pure-local engines (Ollama, vLLM, TEI) usually need none, while cloud or auth-gated endpoints
+   * send it as {@code Authorization: Bearer <key>}.
+   */
+  public static class OpenAiEmbeddingCredentials implements EmbeddingCredentials {
+    public final Optional<String> apiKey;
+
+    public OpenAiEmbeddingCredentials(Optional<String> apiKey) {
+      this.apiKey = apiKey;
+    }
+
+    public static OpenAiEmbeddingCredentials fromBson(DocumentParser parser)
+        throws BsonParseException {
+      return new OpenAiEmbeddingCredentials(parser.getField(Fields.API_KEY).unwrap());
+    }
+
+    @Override
+    public BsonDocument toBson() {
+      return BsonDocumentBuilder.builder().field(Fields.API_KEY, this.apiKey).build();
+    }
+
+    @Override
+    public EmbeddingProvider getCredentialProvider() {
+      return EmbeddingProvider.OPENAI_COMPAT;
+    }
+
+    @Override
+    public EmbeddingCredentials copySanitized(String placeholder) {
+      return new OpenAiEmbeddingCredentials(this.apiKey.map(ignored -> placeholder));
+    }
+
+    @Override
+    public String getCredentialsUuID() {
+      // Stable id for client-side rate limiting. The rate-limiter map is per-model (one
+      // EmbeddingProviderManager per model name), so this id never shares a limiter across
+      // different models. For keyless local engines the id is a fixed string: that only makes the
+      // workloads (query/collectionScan/changeStream) of THAT one model share a single bucket,
+      // which is intended since a local engine has a single capacity.
+      return UUID.nameUUIDFromBytes(
+              Hashing.sha256()
+                  .hashString(this.apiKey.orElse("openai-compat-no-key"), StandardCharsets.UTF_8)
+                  .asBytes())
+          .toString();
+    }
+
+    public static class Fields {
+      static final Field.Optional<String> API_KEY =
+          Field.builder("apiKey").stringField().optional().noDefault();
+    }
+
+    @Override
+    public boolean equals(Object o) {
+      if (this == o) {
+        return true;
+      }
+      if (o == null || getClass() != o.getClass()) {
+        return false;
+      }
+      OpenAiEmbeddingCredentials that = (OpenAiEmbeddingCredentials) o;
+      return Objects.equals(this.apiKey.orElse(null), that.apiKey.orElse(null));
+    }
+
+    @Override
+    public int hashCode() {
+      return Objects.hash(this.apiKey.orElse(null));
     }
   }
 

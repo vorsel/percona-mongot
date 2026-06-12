@@ -146,6 +146,13 @@ public class EmbeddingClientFactory {
         }
         yield voyageClient;
       }
+      case EmbeddingProvider.OPENAI_COMPAT ->
+          new OpenAiCompatClient(
+              embeddingModelConfig,
+              serviceTier,
+              workloadParams,
+              metricsFactory,
+              this.mongotMetadata);
     };
   }
 }
