@@ -42,8 +42,9 @@ import org.slf4j.LoggerFactory;
  *
  * <p>Compared to {@link VoyageClient} this deliberately drops multi-tenant credential routing, flex
  * tier / AIMD congestion control, and billing metadata. It keeps only what every OpenAI-compatible
- * deployment needs: an HTTP/2 client with periodic and on-failure renewal, optional {@code Bearer}
- * auth, base64-float decoding, error categorization, and API-key redaction in logs.
+ * deployment needs: an HTTP/2 client with periodic and on-failure renewal, optional API-key auth
+ * ({@code Authorization: Bearer} or an Azure-style {@code api-key} header), base64-float decoding,
+ * error categorization, and API-key redaction in logs.
  *
  * <p>Day-1 returns {@code float} vectors only; quantized ({@code scalar}/{@code binary}) requests
  * fail fast with a clear error (client-side quantization is the deferred 5%).
@@ -66,8 +67,18 @@ public class OpenAiCompatClient implements ClientInterface {
   private final DistributionSummary inputTokenDistribution;
   private final Counter invalidRequestCounter;
 
+  private static final String DEFAULT_AUTH_HEADER_NAME = "Authorization";
+
   private URI endpoint;
   private Optional<String> apiKey;
+  private String authHeaderName;
+
+  /**
+   * The value to forward as the OpenAI {@code dimensions} request field, present only when the
+   * model config opts in via {@code forwardDimensions} (Matryoshka reduction on OpenAI/Azure).
+   * Empty for local engines, which serve a fixed native dimension and reject the field.
+   */
+  private Optional<Integer> requestDimensions;
 
   private volatile HttpClient httpClient;
 
@@ -93,12 +104,16 @@ public class OpenAiCompatClient implements ClientInterface {
     // @NonNull fields are initialized on every constructor path.
     this.endpoint = URI.create(workloadParams.providerEndpoint().orElse(DEFAULT_ENDPOINT));
     this.apiKey = extractApiKey(workloadParams.credentials());
+    this.authHeaderName = extractAuthHeaderName(workloadParams.credentials());
+    this.requestDimensions = extractRequestDimensions(workloadParams.modelConfig());
     LOG.debug(
-        "Initialized OpenAI-compatible client: model={}, endpoint={}, tier={}, apiKey={}",
+        "Initialized OpenAI-compatible client: model={}, endpoint={}, tier={}, apiKey={},"
+            + " authHeader={}",
         this.modelId,
         this.endpoint,
         tier,
-        this.apiKey.isPresent() ? "set" : "none");
+        this.apiKey.isPresent() ? "set" : "none",
+        this.authHeaderName);
   }
 
   @Override
@@ -133,7 +148,7 @@ public class OpenAiCompatClient implements ClientInterface {
       request = buildRequest(filteredInput);
     } catch (IllegalArgumentException e) {
       String message = e.getMessage();
-      String cleanedMessage = message != null ? removeApiKeyFromHttpHeader(message) : null;
+      String cleanedMessage = message != null ? redactApiKey(message) : null;
       IllegalArgumentException cleanedException =
           new IllegalArgumentException(cleanedMessage, e.getCause());
       LOG.error("HTTP Request Error", cleanedException);
@@ -174,6 +189,21 @@ public class OpenAiCompatClient implements ClientInterface {
   public void updateConfig(EmbeddingModelConfig.ConsolidatedWorkloadParams workloadParams) {
     this.endpoint = URI.create(workloadParams.providerEndpoint().orElse(DEFAULT_ENDPOINT));
     this.apiKey = extractApiKey(workloadParams.credentials());
+    this.authHeaderName = extractAuthHeaderName(workloadParams.credentials());
+    this.requestDimensions = extractRequestDimensions(workloadParams.modelConfig());
+  }
+
+  /**
+   * Resolves the {@code dimensions} value to forward, present only when the model config sets
+   * {@code forwardDimensions: true} and a concrete {@code outputDimensions} is configured.
+   */
+  private static Optional<Integer> extractRequestDimensions(
+      EmbeddingServiceConfig.ModelConfig modelConfig) {
+    if (modelConfig instanceof EmbeddingServiceConfig.OpenAiModelConfig openAiConfig
+        && openAiConfig.shouldForwardDimensions()) {
+      return openAiConfig.getConfiguredOutputDimensions();
+    }
+    return Optional.empty();
   }
 
   private static Optional<String> extractApiKey(
@@ -184,6 +214,21 @@ public class OpenAiCompatClient implements ClientInterface {
     return Optional.empty();
   }
 
+  /**
+   * Resolves the auth header name, defaulting to {@code Authorization}. Azure OpenAI sets this to
+   * {@code api-key}; see {@link #buildRequest} for how the header value is formatted per scheme.
+   */
+  private static String extractAuthHeaderName(
+      EmbeddingServiceConfig.EmbeddingCredentials credentials) {
+    if (credentials instanceof EmbeddingServiceConfig.OpenAiEmbeddingCredentials openAiCreds) {
+      return openAiCreds
+          .authHeaderName
+          .filter(name -> !name.isBlank())
+          .orElse(DEFAULT_AUTH_HEADER_NAME);
+    }
+    return DEFAULT_AUTH_HEADER_NAME;
+  }
+
   private HttpRequest buildRequest(List<String> inputs) {
     HttpRequest.Builder requestBuilder =
         HttpRequest.newBuilder()
@@ -191,7 +236,8 @@ public class OpenAiCompatClient implements ClientInterface {
             .timeout(DEFAULT_TIMEOUT)
             .header("Content-Type", "application/json");
 
-    this.apiKey.ifPresent(key -> requestBuilder.header("Authorization", "Bearer " + key));
+    this.apiKey.ifPresent(
+        key -> requestBuilder.header(this.authHeaderName, formatAuthHeaderValue(key)));
 
     String userAgent =
         this.mongotMetadata
@@ -202,16 +248,28 @@ public class OpenAiCompatClient implements ClientInterface {
             .orElse("mongot/UNKNOWN (UNKNOWN)");
     requestBuilder.header("User-Agent", userAgent);
 
-    // The configured `outputDimensions` sizes the index, but we intentionally do NOT forward it as
-    // the OpenAI `dimensions` request field: local engines (Ollama/TEI) serve a fixed native
-    // dimension and reject the field. Server-side dimension reduction (Matryoshka) is a deferred
-    // follow-up.
+    // The configured `outputDimensions` always sizes the index. We forward it as the OpenAI
+    // `dimensions` request field ONLY when the model config opts in via `forwardDimensions: true`
+    // (Matryoshka reduction on OpenAI/Azure text-embedding-3). By default it is NOT forwarded:
+    // local engines (Ollama/TEI) serve a fixed native dimension and reject the field.
     BsonDocument body =
         new OpenAiApiSchema.EmbedRequest(
-                this.modelId, inputs, OpenAiApiSchema.DEFAULT_ENCODING_FORMAT, Optional.empty())
+                this.modelId,
+                inputs,
+                OpenAiApiSchema.DEFAULT_ENCODING_FORMAT,
+                this.requestDimensions)
             .toBson();
 
     return requestBuilder.POST(HttpRequest.BodyPublishers.ofString(body.toJson())).build();
+  }
+
+  /**
+   * Formats the auth header value for the configured scheme: {@code Authorization} uses the {@code
+   * Bearer} scheme, while any other header name (e.g. Azure OpenAI's {@code api-key}) sends the raw
+   * key.
+   */
+  private String formatAuthHeaderValue(String key) {
+    return this.authHeaderName.equalsIgnoreCase(DEFAULT_AUTH_HEADER_NAME) ? "Bearer " + key : key;
   }
 
   private List<VectorOrError> extractVectorsFromResponse(
@@ -267,9 +325,15 @@ public class OpenAiCompatClient implements ClientInterface {
     }
   }
 
-  /** Redact the API key from error messages. */
-  private static String removeApiKeyFromHttpHeader(String message) {
-    return message.replaceAll("Bearer [^\"\\s]+", "Bearer <REDACTED-API-KEY>");
+  /**
+   * Redact the API key from error messages. Strips both the {@code Bearer <key>} form and, for
+   * non-Bearer schemes (e.g. Azure's {@code api-key} header), the raw key value itself.
+   */
+  private String redactApiKey(String message) {
+    String bearerRedacted = message.replaceAll("Bearer [^\"\\s]+", "Bearer <REDACTED-API-KEY>");
+    return this.apiKey
+        .map(key -> bearerRedacted.replace(key, "<REDACTED-API-KEY>"))
+        .orElse(bearerRedacted);
   }
 
   private static HttpClient newHttpClient() {

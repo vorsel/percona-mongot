@@ -714,21 +714,40 @@ public class EmbeddingServiceConfig implements DocumentEncodable {
     public final Optional<Integer> batchSize;
     public final Optional<Integer> batchTokenLimit;
     public final Optional<VectorAutoEmbedQuantization> quantization;
+    // Opt-in: when true, outputDimensions is forwarded as the OpenAI `dimensions` request field
+    // (Matryoshka dimension reduction on OpenAI/Azure text-embedding-3). Default false because
+    // local engines (Ollama/TEI) serve a fixed native dimension and reject the field.
+    public final Optional<Boolean> forwardDimensions;
 
     public OpenAiModelConfig(
         Optional<Integer> outputDimensions,
         Optional<Integer> batchSize,
         Optional<Integer> batchTokenLimit,
         Optional<VectorAutoEmbedQuantization> quantization) {
+      this(outputDimensions, batchSize, batchTokenLimit, quantization, Optional.empty());
+    }
+
+    public OpenAiModelConfig(
+        Optional<Integer> outputDimensions,
+        Optional<Integer> batchSize,
+        Optional<Integer> batchTokenLimit,
+        Optional<VectorAutoEmbedQuantization> quantization,
+        Optional<Boolean> forwardDimensions) {
       this.outputDimensions = outputDimensions;
       this.batchSize = batchSize;
       this.batchTokenLimit = batchTokenLimit;
       this.quantization = quantization;
+      this.forwardDimensions = forwardDimensions;
     }
 
     @Override
     public EmbeddingProvider getModelProvider() {
       return EmbeddingProvider.OPENAI_COMPAT;
+    }
+
+    /** Whether to forward {@code outputDimensions} as the OpenAI {@code dimensions} request field. */
+    public boolean shouldForwardDimensions() {
+      return this.forwardDimensions.orElse(false);
     }
 
     @Override
@@ -758,6 +777,11 @@ public class EmbeddingServiceConfig implements DocumentEncodable {
       return this.quantization;
     }
 
+    public static class Fields {
+      static final Field.Optional<Boolean> FORWARD_DIMENSIONS =
+          Field.builder("forwardDimensions").booleanField().optional().noDefault();
+    }
+
     @Override
     public BsonDocument toBson() {
       return BsonDocumentBuilder.builder()
@@ -767,6 +791,7 @@ public class EmbeddingServiceConfig implements DocumentEncodable {
           .field(
               VoyageModelConfig.Fields.QUANTIZATION,
               this.quantization.map(VectorAutoEmbedQuantization::getName))
+          .field(Fields.FORWARD_DIMENSIONS, this.forwardDimensions)
           .build();
     }
 
@@ -775,7 +800,8 @@ public class EmbeddingServiceConfig implements DocumentEncodable {
           parser.getField(VoyageModelConfig.Fields.OUTPUT_DIMENSIONS).unwrap(),
           parser.getField(VoyageModelConfig.Fields.BATCH_SIZE).unwrap(),
           parser.getField(VoyageModelConfig.Fields.BATCH_TOKEN_LIMIT).unwrap(),
-          parseQuantization(parser));
+          parseQuantization(parser),
+          parser.getField(Fields.FORWARD_DIMENSIONS).unwrap());
     }
 
     private static Optional<VectorAutoEmbedQuantization> parseQuantization(DocumentParser parser)
@@ -803,7 +829,9 @@ public class EmbeddingServiceConfig implements DocumentEncodable {
       return Objects.equals(this.outputDimensions.orElse(null), that.outputDimensions.orElse(null))
           && Objects.equals(this.batchSize.orElse(null), that.batchSize.orElse(null))
           && Objects.equals(this.batchTokenLimit.orElse(null), that.batchTokenLimit.orElse(null))
-          && Objects.equals(this.quantization.orElse(null), that.quantization.orElse(null));
+          && Objects.equals(this.quantization.orElse(null), that.quantization.orElse(null))
+          && Objects.equals(
+              this.forwardDimensions.orElse(null), that.forwardDimensions.orElse(null));
     }
 
     @Override
@@ -812,7 +840,8 @@ public class EmbeddingServiceConfig implements DocumentEncodable {
           this.outputDimensions.orElse(null),
           this.batchSize.orElse(null),
           this.batchTokenLimit.orElse(null),
-          this.quantization.orElse(null));
+          this.quantization.orElse(null),
+          this.forwardDimensions.orElse(null));
     }
   }
 
@@ -904,22 +933,37 @@ public class EmbeddingServiceConfig implements DocumentEncodable {
    * Credentials for the {@link EmbeddingProvider#OPENAI_COMPAT} provider. The API key is optional:
    * pure-local engines (Ollama, vLLM, TEI) usually need none, while cloud or auth-gated endpoints
    * send it as {@code Authorization: Bearer <key>}.
+   *
+   * <p>{@code authHeaderName} defaults to {@code Authorization} (Bearer scheme). Set it to {@code
+   * api-key} to target Azure OpenAI, which expects the raw key in an {@code api-key} request header
+   * instead of {@code Authorization: Bearer <key>}.
    */
   public static class OpenAiEmbeddingCredentials implements EmbeddingCredentials {
     public final Optional<String> apiKey;
+    public final Optional<String> authHeaderName;
 
     public OpenAiEmbeddingCredentials(Optional<String> apiKey) {
+      this(apiKey, Optional.empty());
+    }
+
+    public OpenAiEmbeddingCredentials(Optional<String> apiKey, Optional<String> authHeaderName) {
       this.apiKey = apiKey;
+      this.authHeaderName = authHeaderName;
     }
 
     public static OpenAiEmbeddingCredentials fromBson(DocumentParser parser)
         throws BsonParseException {
-      return new OpenAiEmbeddingCredentials(parser.getField(Fields.API_KEY).unwrap());
+      return new OpenAiEmbeddingCredentials(
+          parser.getField(Fields.API_KEY).unwrap(),
+          parser.getField(Fields.AUTH_HEADER_NAME).unwrap());
     }
 
     @Override
     public BsonDocument toBson() {
-      return BsonDocumentBuilder.builder().field(Fields.API_KEY, this.apiKey).build();
+      return BsonDocumentBuilder.builder()
+          .field(Fields.API_KEY, this.apiKey)
+          .field(Fields.AUTH_HEADER_NAME, this.authHeaderName)
+          .build();
     }
 
     @Override
@@ -929,7 +973,8 @@ public class EmbeddingServiceConfig implements DocumentEncodable {
 
     @Override
     public EmbeddingCredentials copySanitized(String placeholder) {
-      return new OpenAiEmbeddingCredentials(this.apiKey.map(ignored -> placeholder));
+      return new OpenAiEmbeddingCredentials(
+          this.apiKey.map(ignored -> placeholder), this.authHeaderName);
     }
 
     @Override
@@ -949,6 +994,10 @@ public class EmbeddingServiceConfig implements DocumentEncodable {
     public static class Fields {
       static final Field.Optional<String> API_KEY =
           Field.builder("apiKey").stringField().optional().noDefault();
+      // Defaults to "Authorization" (Bearer scheme) at the client; set to "api-key" for Azure
+      // OpenAI, which sends the raw key in that header.
+      static final Field.Optional<String> AUTH_HEADER_NAME =
+          Field.builder("authHeaderName").stringField().optional().noDefault();
     }
 
     @Override
@@ -960,12 +1009,13 @@ public class EmbeddingServiceConfig implements DocumentEncodable {
         return false;
       }
       OpenAiEmbeddingCredentials that = (OpenAiEmbeddingCredentials) o;
-      return Objects.equals(this.apiKey.orElse(null), that.apiKey.orElse(null));
+      return Objects.equals(this.apiKey.orElse(null), that.apiKey.orElse(null))
+          && Objects.equals(this.authHeaderName.orElse(null), that.authHeaderName.orElse(null));
     }
 
     @Override
     public int hashCode() {
-      return Objects.hash(this.apiKey.orElse(null));
+      return Objects.hash(this.apiKey.orElse(null), this.authHeaderName.orElse(null));
     }
   }
 

@@ -252,7 +252,10 @@ public record EmbeddingModelConfig(
             : baseModelConfig.batchTokenLimit,
         overrideModelConfig.quantization.isPresent()
             ? overrideModelConfig.quantization
-            : baseModelConfig.quantization);
+            : baseModelConfig.quantization,
+        overrideModelConfig.forwardDimensions.isPresent()
+            ? overrideModelConfig.forwardDimensions
+            : baseModelConfig.forwardDimensions);
   }
 
   @Override

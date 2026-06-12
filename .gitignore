@@ -50,3 +50,6 @@ scripts/enterprise/manifest-*.yaml
 scripts/enterprise/manifest_*.yaml
 !scripts/enterprise/manifest_template.yaml
 tmp/
+
+# Local containerized build environment (Colima/Docker dev tooling)
+percona-packaging/build-env/

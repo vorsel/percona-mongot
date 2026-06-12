@@ -116,3 +116,47 @@ configs:
         maxRetryWaitMs: 10000
         jitter: 0.1
       credentials: {}
+
+  # ---------------------------------------------------------------------------
+  # Azure OpenAI via the OPENAI_COMPAT provider (commented example template).
+  #
+  # Uncomment and fill in your resource/deployment/key to enable. It is left
+  # disabled by default because it needs real per-deployment values; without them
+  # it would load a non-functional model.
+  #
+  # Azure hosts the standard OpenAI embedding models (text-embedding-3-small/large,
+  # text-embedding-ada-002) but differs from OpenAI in two ways:
+  #
+  #   1. The endpoint is a per-deployment URL with a required api-version query
+  #      parameter (kept here in providerEndpoint, no code change needed):
+  #        https://{resource}.openai.azure.com/openai/deployments/{deployment}/embeddings?api-version=2024-02-01
+  #   2. Auth uses an `api-key: <key>` request header instead of
+  #      `Authorization: Bearer <key>`. Set credentials.authHeaderName to api-key;
+  #      the raw key is then sent in that header (no Bearer prefix).
+  #
+  # authHeaderName defaults to Authorization (Bearer scheme) when omitted, which is
+  # what plain OpenAI and most local engines expect.
+  #
+  # forwardDimensions (optional, default false): when true, outputDimensions is sent as the
+  # OpenAI `dimensions` request field for Matryoshka dimension reduction (OpenAI/Azure
+  # text-embedding-3 only). Leave false/unset for local engines (Ollama/TEI), which serve a
+  # fixed native dimension and reject the field.
+  #
+  # - modelName: text-embedding-3-small
+  #   embeddingProvider: OPENAI_COMPAT
+  #   config:
+  #     providerEndpoint: https://my-resource.openai.azure.com/openai/deployments/text-embedding-3-small/embeddings?api-version=2024-02-01
+  #     modelConfig:
+  #       batchSize: 96
+  #       batchTokenLimit: 120000
+  #       outputDimensions: 1536
+  #       quantization: float
+  #       forwardDimensions: true
+  #     errorHandlingConfig:
+  #       maxRetries: 10
+  #       initialRetryWaitMs: 200
+  #       maxRetryWaitMs: 10000
+  #       jitter: 0.1
+  #     credentials:
+  #       apiKey: "<your-azure-openai-api-key>"
+  #       authHeaderName: api-key

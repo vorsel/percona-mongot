@@ -23,10 +23,14 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.Base64;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Flow;
+import java.util.concurrent.TimeUnit;
 import org.junit.Test;
 import org.mockito.ArgumentCaptor;
 
@@ -41,13 +45,28 @@ public class OpenAiCompatClientTest {
   }
 
   private static EmbeddingModelConfig openAiModel(Optional<String> apiKey) {
+    return openAiModel(apiKey, Optional.empty());
+  }
+
+  private static EmbeddingModelConfig openAiModel(
+      Optional<String> apiKey, Optional<String> authHeaderName) {
+    return openAiModel(
+        apiKey,
+        authHeaderName,
+        new EmbeddingServiceConfig.OpenAiModelConfig(
+            Optional.empty(), Optional.of(96), Optional.of(120_000), Optional.empty()));
+  }
+
+  private static EmbeddingModelConfig openAiModel(
+      Optional<String> apiKey,
+      Optional<String> authHeaderName,
+      EmbeddingServiceConfig.OpenAiModelConfig modelConfig) {
     EmbeddingServiceConfig.OpenAiEmbeddingCredentials creds =
-        new EmbeddingServiceConfig.OpenAiEmbeddingCredentials(apiKey);
+        new EmbeddingServiceConfig.OpenAiEmbeddingCredentials(apiKey, authHeaderName);
     EmbeddingServiceConfig.EmbeddingConfig config =
         new EmbeddingServiceConfig.EmbeddingConfig(
             Optional.empty(),
-            new EmbeddingServiceConfig.OpenAiModelConfig(
-                Optional.empty(), Optional.of(96), Optional.of(120_000), Optional.empty()),
+            modelConfig,
             RETRY_CONFIG,
             creds,
             Optional.empty(),
@@ -174,6 +193,58 @@ public class OpenAiCompatClientTest {
   }
 
   @Test
+  public void embed_usesAzureApiKeyHeaderWhenConfigured() throws Exception {
+    String body =
+        String.format("{\"data\":[{\"embedding\":\"%s\",\"index\":0}]}", base64Floats(1f, 2f, 3f));
+
+    // authHeaderName=api-key (Azure OpenAI) -> raw key in api-key header, no Bearer, no
+    // Authorization header.
+    OpenAiCompatClient client =
+        newClient(openAiModel(Optional.of("secret-key"), Optional.of("api-key")));
+    HttpClient http = mockHttpClient(200, body);
+    OpenAiCompatClient.injectHttpClient(client, http);
+    client.embed(List.of("hello"), floatContext());
+    HttpRequest request = captureRequest(http);
+    assertEquals("secret-key", request.headers().firstValue("api-key").orElse(null));
+    assertFalse(request.headers().firstValue("Authorization").isPresent());
+  }
+
+  @Test
+  public void embed_forwardsDimensionsOnlyWhenOptedIn() throws Exception {
+    String body =
+        String.format("{\"data\":[{\"embedding\":\"%s\",\"index\":0}]}", base64Floats(1f, 2f, 3f));
+
+    // forwardDimensions=true with a configured outputDimensions -> `dimensions` in request body.
+    EmbeddingServiceConfig.OpenAiModelConfig withForward =
+        new EmbeddingServiceConfig.OpenAiModelConfig(
+            Optional.of(512), Optional.of(96), Optional.of(120_000), Optional.empty(),
+            Optional.of(true));
+    OpenAiCompatClient forwardClient =
+        newClient(openAiModel(Optional.empty(), Optional.empty(), withForward));
+    HttpClient forwardHttp = mockHttpClient(200, body);
+    OpenAiCompatClient.injectHttpClient(forwardClient, forwardHttp);
+    forwardClient.embed(List.of("hello"), floatContext());
+    String forwardBody = requestBody(captureRequest(forwardHttp));
+    assertTrue(
+        "Expected dimensions forwarded when opted in: " + forwardBody,
+        forwardBody.contains("\"dimensions\"") && forwardBody.contains("512"));
+
+    // Default (no forwardDimensions): outputDimensions set but NOT forwarded (local engines reject).
+    EmbeddingServiceConfig.OpenAiModelConfig noForward =
+        new EmbeddingServiceConfig.OpenAiModelConfig(
+            Optional.of(768), Optional.of(96), Optional.of(120_000), Optional.empty());
+    OpenAiCompatClient defaultClient =
+        newClient(openAiModel(Optional.empty(), Optional.empty(), noForward));
+    HttpClient defaultHttp = mockHttpClient(200, body);
+    OpenAiCompatClient.injectHttpClient(defaultClient, defaultHttp);
+    defaultClient.embed(List.of("hello"), floatContext());
+    String defaultBody = requestBody(captureRequest(defaultHttp));
+    assertFalse(
+        "Expected no dimensions field by default: " + defaultBody,
+        defaultBody.contains("\"dimensions\""));
+  }
+
+  @Test
   public void embed_rateLimited429_throwsTransient() throws Exception {
     OpenAiCompatClient client = newClient(openAiModel(Optional.empty()));
     OpenAiCompatClient.injectHttpClient(client, mockHttpClient(429, "{\"error\":\"rate limit\"}"));
@@ -221,5 +292,36 @@ public class OpenAiCompatClientTest {
     org.mockito.Mockito.verify(httpClient)
         .send(captor.capture(), any(HttpResponse.BodyHandler.class));
     return captor.getValue();
+  }
+
+  /** Reads the JSON body out of the request's {@link HttpRequest.BodyPublisher}. */
+  private static String requestBody(HttpRequest request) throws Exception {
+    HttpRequest.BodyPublisher publisher = request.bodyPublisher().orElseThrow();
+    StringBuilder sb = new StringBuilder();
+    CountDownLatch latch = new CountDownLatch(1);
+    publisher.subscribe(
+        new Flow.Subscriber<ByteBuffer>() {
+          @Override
+          public void onSubscribe(Flow.Subscription subscription) {
+            subscription.request(Long.MAX_VALUE);
+          }
+
+          @Override
+          public void onNext(ByteBuffer item) {
+            sb.append(StandardCharsets.UTF_8.decode(item));
+          }
+
+          @Override
+          public void onError(Throwable throwable) {
+            latch.countDown();
+          }
+
+          @Override
+          public void onComplete() {
+            latch.countDown();
+          }
+        });
+    latch.await(5, TimeUnit.SECONDS);
+    return sb.toString();
   }
 }
