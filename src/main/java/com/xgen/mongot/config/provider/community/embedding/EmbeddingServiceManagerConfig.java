@@ -30,11 +30,8 @@ public record EmbeddingServiceManagerConfig(List<EmbeddingServiceConfig> configs
   private static final Logger LOG = LoggerFactory.getLogger(EmbeddingServiceManagerConfig.class);
   private static final String CONFIG_RESOURCE = "config/community/embedding-service-configs.yml";
 
-  /**
-   * System property pointing at an on-disk model catalog. The bundle launcher sets this to the
-   * default file shipped next to the JAR (install dir), so operators can edit that file (or mount
-   * their own) and restart to pick up changes without rebuilding mongot.
-   */
+  // path to the on-disk catalog; the launcher points this at the file shipped next to the JAR, which
+  // operators can edit and restart to pick up
   static final String MODEL_CONFIG_FILE_PROPERTY = "mongot.embeddingModelConfigFile";
 
   /** Simple holder for Voyage API credentials. */
@@ -61,32 +58,21 @@ public record EmbeddingServiceManagerConfig(List<EmbeddingServiceConfig> configs
   }
 
   /**
-   * Loads embedding configuration, preferring an on-disk model catalog when one is available.
-   *
-   * <p>The catalog is resolved in the following order:
+   * Load the embedding config, resolving the catalog in order:
    *
    * <ol>
-   *   <li>{@code modelConfigFileOverride} (the {@code embedding.modelConfigFile} community config
-   *       field), when present;
-   *   <li>otherwise the path in the {@value #MODEL_CONFIG_FILE_PROPERTY} system property, which the
-   *       bundle launcher sets to the default catalog shipped next to the JAR;
-   *   <li>otherwise the catalog bundled inside the JAR as a classpath resource.
+   *   <li>{@code modelConfigFileOverride} ({@code embedding.modelConfigFile}), if present;
+   *   <li>the {@value #MODEL_CONFIG_FILE_PROPERTY} system property (file shipped next to the JAR);
+   *   <li>the catalog bundled in the JAR.
    * </ol>
    *
-   * <p>Because the on-disk file is re-read on every startup, operators can edit it (or mount their
-   * own) and restart the container to add/override models without rebuilding mongot. If an external
-   * path is configured but missing/unreadable, we fall back to the bundled resource rather than
-   * disabling auto-embedding.
+   * <p>A configured-but-missing/unreadable path falls back to the bundled resource rather than
+   * disabling auto-embedding. Without Voyage credentials, {@code VOYAGE} entries are dropped while
+   * keyless providers ({@code OPENAI_COMPAT}) still load.
    *
-   * <p>Voyage credentials are optional: when absent, {@code VOYAGE} model entries (which require an
-   * API key) are dropped, while providers with optional credentials (e.g. {@code OPENAI_COMPAT}
-   * pointing at a local Ollama/vLLM/TEI engine) are still loaded. This lets a keyless local
-   * deployment use auto-embedding without configuring Voyage keys.
-   *
-   * @param credentials the optional Voyage API credentials (query and indexing keys)
+   * @param credentials optional Voyage API credentials (query and indexing keys)
    * @param modelConfigFileOverride explicit on-disk catalog path from the community config
-   * @return optional embedding service manager configuration, empty only when the catalog is
-   *     missing or fails to parse
+   * @return empty only when the catalog is missing or fails to parse
    */
   public static Optional<EmbeddingServiceManagerConfig> loadEmbeddingServiceConfig(
       Optional<VoyageCredentials> credentials, Optional<Path> modelConfigFileOverride) {
@@ -98,10 +84,7 @@ public record EmbeddingServiceManagerConfig(List<EmbeddingServiceConfig> configs
     return loadFromResource(credentials);
   }
 
-  /**
-   * Resolves the on-disk catalog path from the explicit override or the launcher-set system
-   * property, logging and skipping any configured path that does not point at a readable file.
-   */
+  /** On-disk catalog path from the override or system property; skips a path that isn't a readable file. */
   private static Optional<Path> resolveExternalCatalogPath(
       Optional<Path> modelConfigFileOverride) {
     Optional<Path> configured =
@@ -139,11 +122,9 @@ public record EmbeddingServiceManagerConfig(List<EmbeddingServiceConfig> configs
       String yaml = Files.readString(path, StandardCharsets.UTF_8);
       return Optional.of(fromBson(YamlCodec.fromYaml(yaml), credentials));
     } catch (Exception e) {
-      // The on-disk catalog is operator-editable (Option A), so a typo or unreadable file must not
-      // crash startup or silently disable Voyage. We catch broadly here because YamlCodec.fromYaml
-      // delegates to SnakeYAML, which throws unchecked YAMLException on malformed YAML in addition
-      // to the declared IOException/BsonParseException. Fall back to the bundled catalog so mongot
-      // still starts with the shipped models.
+      // catch broadly: the file is operator-editable, and SnakeYAML throws unchecked YAMLException on
+      // bad YAML on top of the declared IOException/BsonParseException. a typo mustn't crash startup —
+      // fall back to the bundled catalog.
       LOG.error(
           "Failed to load embedding configuration from on-disk catalog {}; falling back to the "
               + "bundled catalog.",
@@ -253,14 +234,9 @@ public record EmbeddingServiceManagerConfig(List<EmbeddingServiceConfig> configs
   }
 
   /**
-   * Injects the {@code _provider} discriminator and community-specific fields into the config
-   * document, keyed off the entry's {@code embeddingProvider}.
-   *
-   * <p>For {@code VOYAGE} entries this injects the loaded Voyage credentials (base indexing key and
-   * query key) so the bundled YAML stays credential-free. For other providers (e.g. {@code
-   * OPENAI_COMPAT}) the YAML supplies its own credentials (an optional API key); we only ensure a
-   * credentials document exists and carries the discriminator. {@code isDedicatedCluster: true} is
-   * injected for all providers.
+   * Inject the {@code _provider} discriminator and community fields into the config doc. VOYAGE
+   * entries get the loaded keys (so the bundled YAML stays credential-free); other providers keep
+   * their own YAML credentials. {@code isDedicatedCluster: true} is set for all.
    */
   private static void injectCredentials(
       BsonDocument configDoc, Optional<VoyageCredentials> credentials) {
@@ -270,8 +246,7 @@ public record EmbeddingServiceManagerConfig(List<EmbeddingServiceConfig> configs
     String provider = providerOf(configDoc);
     BsonDocument configField = configDoc.getDocument("config");
 
-    // Inject the _provider discriminator into base modelConfig so the polymorphic parser can pick
-    // the matching ModelConfig subtype.
+    // tag modelConfig with _provider so the polymorphic parser picks the right ModelConfig subtype
     if (configField.containsKey("modelConfig")) {
       BsonDocument modelConfig = configField.getDocument("modelConfig");
       if (!modelConfig.containsKey("_provider")) {
@@ -279,13 +254,12 @@ public record EmbeddingServiceManagerConfig(List<EmbeddingServiceConfig> configs
       }
     }
 
-    // VOYAGE entries are only reached here when credentials are present (callers skip them
-    // otherwise), so the get() is safe.
+    // callers skip VOYAGE entries when credentials are absent, so orElseThrow is safe here
     if ("VOYAGE".equals(provider)) {
       injectVoyageCredentials(configField, credentials.orElseThrow());
     } else {
-      // Non-Voyage providers bring their own credentials in the YAML (API key optional). Ensure a
-      // credentials document exists and carries the discriminator.
+      // other providers carry their own credentials in the YAML; just ensure the doc exists + tagged
+
       BsonDocument credentialsDoc =
           configField.containsKey("credentials")
               ? configField.getDocument("credentials")
@@ -296,7 +270,6 @@ public record EmbeddingServiceManagerConfig(List<EmbeddingServiceConfig> configs
       configField.put("credentials", credentialsDoc);
     }
 
-    // Inject isDedicatedCluster for each config
     if (!configField.containsKey("isDedicatedCluster")) {
       configField.put("isDedicatedCluster", BsonBoolean.TRUE);
     }
@@ -305,14 +278,13 @@ public record EmbeddingServiceManagerConfig(List<EmbeddingServiceConfig> configs
   /** Injects the loaded Voyage base and query credentials into a {@code VOYAGE} config entry. */
   private static void injectVoyageCredentials(
       BsonDocument configField, VoyageCredentials credentials) {
-    // Inject base level credentials
     if (!configField.containsKey("credentials")) {
       BsonDocument credentialsDoc = credentials.indexingCredentials.toBson();
       credentialsDoc.put("_provider", new BsonString("VOYAGE"));
       configField.put("credentials", credentialsDoc);
     }
 
-    // Inject query workload credentials override
+    // query tier overrides with the query key
     if (!configField.containsKey("query")) {
       BsonDocument queryCredentialsDoc = credentials.queryCredentials.toBson();
       queryCredentialsDoc.put("_provider", new BsonString("VOYAGE"));

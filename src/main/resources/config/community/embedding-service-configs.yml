@@ -110,6 +110,11 @@ configs:
         batchTokenLimit: 120000
         outputDimensions: 768
         quantization: float
+        # nomic-embed-text needs task-instruction prefixes for good retrieval quality: the query
+        # path and the indexing path are embedded differently. The separator (": ") is part of the
+        # value. Symmetric models (e.g. OpenAI text-embedding-3) should omit these.
+        queryPrefix: "search_query: "
+        documentPrefix: "search_document: "
       errorHandlingConfig:
         maxRetries: 10
         initialRetryWaitMs: 200

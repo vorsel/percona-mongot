@@ -555,10 +555,9 @@ public class CommunityMongotBootstrapper {
       MeterRegistry meterRegistry,
       SearchCommandsRegister.BootstrapperMetadata bootstrapperMetadata) {
 
-    // Auto-embedding activates when the community config declares an `embedding` section. Voyage
-    // API keys are no longer required to turn the subsystem on: a keyless local deployment can use
-    // OPENAI_COMPAT models (Ollama/vLLM/TEI), while Voyage models still need queryKeyFile and
-    // indexingKeyFile and are dropped when those are absent.
+    // auto-embedding turns on when the config has an `embedding` section — no Voyage keys needed
+    // anymore (OPENAI_COMPAT works keyless). Voyage models still need query/indexing keys or they're
+    // dropped.
     if (config.embeddingConfig().isEmpty()) {
       LOG.info(
           "Auto-embedding functionality is disabled. To enable, add an `embedding` section to "
@@ -571,9 +570,8 @@ public class CommunityMongotBootstrapper {
     Optional<EmbeddingServiceManagerConfig.VoyageCredentials> credentials =
         loadVoyageCredentials(config.embeddingConfig());
 
-    // Load embedding model catalog, preferring an on-disk override (community config
-    // `embedding.modelConfigFile`) or the default catalog shipped next to the JAR, falling back to
-    // the catalog bundled inside the JAR.
+    // catalog source order: on-disk override (embedding.modelConfigFile) -> file shipped next to the
+    // JAR -> bundled-in-JAR resource
     Optional<Path> modelConfigFile =
         config.embeddingConfig().flatMap(EmbeddingConfig::modelConfigFile);
     Optional<EmbeddingServiceManagerConfig> embeddingConfigOpt =
@@ -673,14 +671,11 @@ public class CommunityMongotBootstrapper {
   }
 
   /**
-   * Applies the global {@code embedding.providerEndpoint} override (mongot.yml) to Voyage models
-   * only.
+   * Apply the global {@code embedding.providerEndpoint} override to Voyage models only.
    *
-   * <p>This key is an upstream MongoDB knob designed for a Voyage-only world (one endpoint for the
-   * single provider), so we keep its documented behavior intact for Voyage. OPENAI_COMPAT is a
-   * Percona addition where each engine (Ollama/vLLM/TEI) has its own URL; those endpoints are
-   * configured per-model in the on-disk catalog (embedding-service-configs.yml) and must NOT be
-   * collapsed onto a single global value. Hence non-Voyage configs are returned unchanged.
+   * <p>It's an upstream single-provider knob, so we keep it for Voyage. OPENAI_COMPAT models each
+   * have their own URL in the catalog and must not be collapsed onto one global value, so they're
+   * returned unchanged.
    */
   static List<EmbeddingServiceConfig> applyEndpointOverride(
       List<EmbeddingServiceConfig> configs, String endpoint) {

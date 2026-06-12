@@ -81,10 +81,19 @@ public class OpenAiCompatClientTest {
   }
 
   private static OpenAiCompatClient newClient(EmbeddingModelConfig model) {
+    return newClient(model, ServiceTier.QUERY);
+  }
+
+  private static OpenAiCompatClient newClient(EmbeddingModelConfig model, ServiceTier tier) {
     EmbeddingClientFactory factory =
         new EmbeddingClientFactory(new SimpleMeterRegistry(), DeploymentEnvironment.COMMUNITY);
-    ClientInterface client =
-        factory.createEmbeddingClient(model, ServiceTier.QUERY, model.query());
+    EmbeddingModelConfig.ConsolidatedWorkloadParams params =
+        switch (tier) {
+          case QUERY -> model.query();
+          case CHANGE_STREAM -> model.changeStream();
+          case COLLECTION_SCAN -> model.collectionScan();
+        };
+    ClientInterface client = factory.createEmbeddingClient(model, tier, params);
     assertTrue(
         "Expected OPENAI_COMPAT provider to build an OpenAiCompatClient",
         client instanceof OpenAiCompatClient);
@@ -242,6 +251,43 @@ public class OpenAiCompatClientTest {
     assertFalse(
         "Expected no dimensions field by default: " + defaultBody,
         defaultBody.contains("\"dimensions\""));
+  }
+
+  @Test
+  public void embed_prependsTierAwarePrefix() throws Exception {
+    String body =
+        String.format("{\"data\":[{\"embedding\":\"%s\",\"index\":0}]}", base64Floats(1f, 2f, 3f));
+    EmbeddingServiceConfig.OpenAiModelConfig withPrefixes =
+        new EmbeddingServiceConfig.OpenAiModelConfig(
+            Optional.empty(),
+            Optional.of(96),
+            Optional.of(120_000),
+            Optional.empty(),
+            Optional.empty(),
+            Optional.of("search_query: "),
+            Optional.of("search_document: "));
+    EmbeddingModelConfig model = openAiModel(Optional.empty(), Optional.empty(), withPrefixes);
+
+    // QUERY tier -> queryPrefix.
+    OpenAiCompatClient queryClient = newClient(model, ServiceTier.QUERY);
+    HttpClient queryHttp = mockHttpClient(200, body);
+    OpenAiCompatClient.injectHttpClient(queryClient, queryHttp);
+    queryClient.embed(List.of("hello"), floatContext());
+    assertTrue(requestBody(captureRequest(queryHttp)).contains("search_query: hello"));
+
+    // Indexing tier (collection scan) -> documentPrefix.
+    OpenAiCompatClient scanClient = newClient(model, ServiceTier.COLLECTION_SCAN);
+    HttpClient scanHttp = mockHttpClient(200, body);
+    OpenAiCompatClient.injectHttpClient(scanClient, scanHttp);
+    scanClient.embed(List.of("hello"), floatContext());
+    assertTrue(requestBody(captureRequest(scanHttp)).contains("search_document: hello"));
+
+    // No prefixes configured -> input sent verbatim.
+    OpenAiCompatClient plainClient = newClient(openAiModel(Optional.empty()), ServiceTier.QUERY);
+    HttpClient plainHttp = mockHttpClient(200, body);
+    OpenAiCompatClient.injectHttpClient(plainClient, plainHttp);
+    plainClient.embed(List.of("hello"), floatContext());
+    assertFalse(requestBody(captureRequest(plainHttp)).contains("search_query"));
   }
 
   @Test

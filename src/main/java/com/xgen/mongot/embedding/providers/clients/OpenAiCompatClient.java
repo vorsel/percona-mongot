@@ -37,17 +37,15 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Per model and service tier client for any server speaking the OpenAI-compatible {@code
- * /v1/embeddings} protocol (OpenAI, Ollama, vLLM, HF TEI, Together, ...).
+ * Embedding client for any server speaking the OpenAI {@code /v1/embeddings} protocol (OpenAI,
+ * Ollama, vLLM, HF TEI, Together, ...). One instance per model + service tier.
  *
- * <p>Compared to {@link VoyageClient} this deliberately drops multi-tenant credential routing, flex
- * tier / AIMD congestion control, and billing metadata. It keeps only what every OpenAI-compatible
- * deployment needs: an HTTP/2 client with periodic and on-failure renewal, optional API-key auth
- * ({@code Authorization: Bearer} or an Azure-style {@code api-key} header), base64-float decoding,
- * error categorization, and API-key redaction in logs.
+ * <p>Unlike {@link VoyageClient} there's no multi-tenant routing, flex tier / AIMD, or billing
+ * metadata: just an HTTP/2 client (renewed periodically and on failure), optional API-key auth
+ * ({@code Authorization: Bearer} or an Azure {@code api-key} header), base64-float decoding, and
+ * key redaction in logs.
  *
- * <p>Day-1 returns {@code float} vectors only; quantized ({@code scalar}/{@code binary}) requests
- * fail fast with a clear error (client-side quantization is the deferred 5%).
+ * <p>float vectors only; scalar/binary quantization requests fail fast (not implemented yet).
  */
 public class OpenAiCompatClient implements ClientInterface {
   private static final Logger LOG = LoggerFactory.getLogger(OpenAiCompatClient.class);
@@ -63,6 +61,7 @@ public class OpenAiCompatClient implements ClientInterface {
   public static final String DEFAULT_ENDPOINT = "https://api.openai.com/v1/embeddings";
 
   private final String modelId;
+  private final EmbeddingServiceConfig.ServiceTier serviceTier;
   private final Optional<MongotMetadata> mongotMetadata;
   private final DistributionSummary inputTokenDistribution;
   private final Counter invalidRequestCounter;
@@ -73,12 +72,13 @@ public class OpenAiCompatClient implements ClientInterface {
   private Optional<String> apiKey;
   private String authHeaderName;
 
-  /**
-   * The value to forward as the OpenAI {@code dimensions} request field, present only when the
-   * model config opts in via {@code forwardDimensions} (Matryoshka reduction on OpenAI/Azure).
-   * Empty for local engines, which serve a fixed native dimension and reject the field.
-   */
+  // sent as the OpenAI `dimensions` field, only when forwardDimensions is set (Matryoshka shrink on
+  // OpenAI/Azure). empty for local engines, which reject the field.
   private Optional<Integer> requestDimensions;
+
+  // prepended to each input; query and document tiers differ (queryPrefix/documentPrefix). empty =
+  // no prefix.
+  private String inputPrefix;
 
   private volatile HttpClient httpClient;
 
@@ -95,17 +95,18 @@ public class OpenAiCompatClient implements ClientInterface {
       MetricsFactory metricsFactory,
       Optional<MongotMetadata> metadata) {
     this.modelId = embeddingModelConfig.name();
+    this.serviceTier = tier;
     this.mongotMetadata = metadata;
     this.inputTokenDistribution = metricsFactory.summary("inputTokenDistribution");
     this.invalidRequestCounter = metricsFactory.counter("invalidRequestCounter");
     this.httpClient = newHttpClient();
     this.httpClientCreatedEpochMs = System.currentTimeMillis();
-    // Assign config fields directly here (rather than via updateConfig) so NullAway can prove the
-    // @NonNull fields are initialized on every constructor path.
+    // assign directly, not via updateConfig, so NullAway sees the @NonNull fields set on every path
     this.endpoint = URI.create(workloadParams.providerEndpoint().orElse(DEFAULT_ENDPOINT));
     this.apiKey = extractApiKey(workloadParams.credentials());
     this.authHeaderName = extractAuthHeaderName(workloadParams.credentials());
     this.requestDimensions = extractRequestDimensions(workloadParams.modelConfig());
+    this.inputPrefix = extractInputPrefix(workloadParams.modelConfig(), tier);
     LOG.debug(
         "Initialized OpenAI-compatible client: model={}, endpoint={}, tier={}, apiKey={},"
             + " authHeader={}",
@@ -119,8 +120,7 @@ public class OpenAiCompatClient implements ClientInterface {
   @Override
   public List<VectorOrError> embed(List<String> inputs, EmbeddingRequestContext context)
       throws EmbeddingProviderTransientException, EmbeddingProviderNonTransientException {
-    // Day-1: float embeddings only. Quantization is performed server-side by the engine and is not
-    // expressible in the OpenAI protocol, so fail fast (the deferred 5%).
+    // float only: the OpenAI protocol can't request quantized output, so fail fast
     if (context.autoEmbedQuantization() != VectorAutoEmbedQuantization.FLOAT) {
       throw new EmbeddingProviderNonTransientException(
           "OPENAI_COMPAT provider currently supports only float embeddings; quantization '"
@@ -191,12 +191,10 @@ public class OpenAiCompatClient implements ClientInterface {
     this.apiKey = extractApiKey(workloadParams.credentials());
     this.authHeaderName = extractAuthHeaderName(workloadParams.credentials());
     this.requestDimensions = extractRequestDimensions(workloadParams.modelConfig());
+    this.inputPrefix = extractInputPrefix(workloadParams.modelConfig(), this.serviceTier);
   }
 
-  /**
-   * Resolves the {@code dimensions} value to forward, present only when the model config sets
-   * {@code forwardDimensions: true} and a concrete {@code outputDimensions} is configured.
-   */
+  /** Dimensions to send, only when forwardDimensions is on and outputDimensions is set. */
   private static Optional<Integer> extractRequestDimensions(
       EmbeddingServiceConfig.ModelConfig modelConfig) {
     if (modelConfig instanceof EmbeddingServiceConfig.OpenAiModelConfig openAiConfig
@@ -204,6 +202,15 @@ public class OpenAiCompatClient implements ClientInterface {
       return openAiConfig.getConfiguredOutputDimensions();
     }
     return Optional.empty();
+  }
+
+  /** Query/document prefix for this tier, or empty string when none is set. */
+  private static String extractInputPrefix(
+      EmbeddingServiceConfig.ModelConfig modelConfig, EmbeddingServiceConfig.ServiceTier tier) {
+    if (modelConfig instanceof EmbeddingServiceConfig.OpenAiModelConfig openAiConfig) {
+      return openAiConfig.inputPrefixForTier(tier);
+    }
+    return "";
   }
 
   private static Optional<String> extractApiKey(
@@ -214,10 +221,7 @@ public class OpenAiCompatClient implements ClientInterface {
     return Optional.empty();
   }
 
-  /**
-   * Resolves the auth header name, defaulting to {@code Authorization}. Azure OpenAI sets this to
-   * {@code api-key}; see {@link #buildRequest} for how the header value is formatted per scheme.
-   */
+  /** Auth header name, default {@code Authorization}; Azure uses {@code api-key}. */
   private static String extractAuthHeaderName(
       EmbeddingServiceConfig.EmbeddingCredentials credentials) {
     if (credentials instanceof EmbeddingServiceConfig.OpenAiEmbeddingCredentials openAiCreds) {
@@ -248,14 +252,17 @@ public class OpenAiCompatClient implements ClientInterface {
             .orElse("mongot/UNKNOWN (UNKNOWN)");
     requestBuilder.header("User-Agent", userAgent);
 
-    // The configured `outputDimensions` always sizes the index. We forward it as the OpenAI
-    // `dimensions` request field ONLY when the model config opts in via `forwardDimensions: true`
-    // (Matryoshka reduction on OpenAI/Azure text-embedding-3). By default it is NOT forwarded:
-    // local engines (Ollama/TEI) serve a fixed native dimension and reject the field.
+    // prepend the tier prefix when set (e.g. nomic "search_query: "). inputs are already non-empty.
+    List<String> prefixedInputs =
+        this.inputPrefix.isEmpty()
+            ? inputs
+            : inputs.stream().map(text -> this.inputPrefix + text).toList();
+
+    // only send `dimensions` when forwardDimensions is on; local engines reject it
     BsonDocument body =
         new OpenAiApiSchema.EmbedRequest(
                 this.modelId,
-                inputs,
+                prefixedInputs,
                 OpenAiApiSchema.DEFAULT_ENCODING_FORMAT,
                 this.requestDimensions)
             .toBson();
@@ -263,11 +270,7 @@ public class OpenAiCompatClient implements ClientInterface {
     return requestBuilder.POST(HttpRequest.BodyPublishers.ofString(body.toJson())).build();
   }
 
-  /**
-   * Formats the auth header value for the configured scheme: {@code Authorization} uses the {@code
-   * Bearer} scheme, while any other header name (e.g. Azure OpenAI's {@code api-key}) sends the raw
-   * key.
-   */
+  /** Authorization uses the Bearer scheme; other headers (Azure {@code api-key}) send the raw key. */
   private String formatAuthHeaderValue(String key) {
     return this.authHeaderName.equalsIgnoreCase(DEFAULT_AUTH_HEADER_NAME) ? "Bearer " + key : key;
   }
@@ -294,9 +297,7 @@ public class OpenAiCompatClient implements ClientInterface {
           String.format("Timeout exception (HTTP 408). Response body: %s", response.body()));
     }
     if (statusCode == 401 || statusCode == 403) {
-      // Authentication/authorization failure: a missing/invalid API key or a key without access.
-      // Retrying cannot fix this, so fail fast (non-transient) with an actionable message rather
-      // than retrying until maxRetries is exhausted.
+      // bad/missing key or no access — retrying won't help, so fail fast instead of burning retries
       this.invalidRequestCounter.increment();
       throw new EmbeddingProviderNonTransientException(
           String.format(
@@ -336,10 +337,7 @@ public class OpenAiCompatClient implements ClientInterface {
     }
   }
 
-  /**
-   * Redact the API key from error messages. Strips both the {@code Bearer <key>} form and, for
-   * non-Bearer schemes (e.g. Azure's {@code api-key} header), the raw key value itself.
-   */
+  /** Redact the API key from error messages: both the {@code Bearer <key>} form and the raw key. */
   private String redactApiKey(String message) {
     String bearerRedacted = message.replaceAll("Bearer [^\"\\s]+", "Bearer <REDACTED-API-KEY>");
     return this.apiKey
@@ -351,10 +349,7 @@ public class OpenAiCompatClient implements ClientInterface {
     return HttpClient.newBuilder().version(HttpClient.Version.HTTP_2).build();
   }
 
-  /**
-   * Replaces the {@link HttpClient} periodically so underlying HTTP/2 and TLS connections are not
-   * held indefinitely (e.g. DNS updates, server idle limits).
-   */
+  /** Replace the client periodically so HTTP/2 + TLS connections aren't held forever (DNS, idle limits). */
   private void renewHttpClientIfStale() {
     long refreshMs = HTTP_CLIENT_REFRESH_INTERVAL.toMillis();
     if (System.currentTimeMillis() - this.httpClientCreatedEpochMs < refreshMs) {
@@ -368,10 +363,7 @@ public class OpenAiCompatClient implements ClientInterface {
     }
   }
 
-  /**
-   * Whether {@code throwable} or its causes indicate TLS, handshake, or transport connection issues
-   * where replacing {@link HttpClient} may help the next retry succeed.
-   */
+  /** True if the error (or a cause) is a TLS/connection failure where a fresh client may help the retry. */
   private static boolean indicatesConnectionLayerFailure(Throwable throwable) {
     for (Throwable t = throwable; t != null; t = t.getCause()) {
       if (t instanceof SSLException || t instanceof ConnectException) {
@@ -395,8 +387,8 @@ public class OpenAiCompatClient implements ClientInterface {
   }
 
   /**
-   * Replaces the client after connection/TLS failures so retries do not reuse bad state. If another
-   * thread already renewed, {@link #httpClient} will differ and we skip duplicate replace/shutdown.
+   * Replace the client after a connection/TLS failure so retries don't reuse bad state. If another
+   * thread already renewed, {@link #httpClient} differs and we skip the duplicate.
    */
   private void renewHttpClientAfterConnectionFailure(Throwable cause, HttpClient culpritClient) {
     synchronized (this) {
@@ -426,10 +418,7 @@ public class OpenAiCompatClient implements ClientInterface {
         .execute(() -> shutdownReplacedHttpClient(previous));
   }
 
-  /**
-   * Shuts down the replaced {@link HttpClient} to release its connection pools and threads (JDK 21+
-   * {@code HttpClient} lifecycle).
-   */
+  /** Shut down the replaced client to release its connection pools and threads (JDK 21+ lifecycle). */
   private void shutdownReplacedHttpClient(HttpClient previous) {
     if (previous == null) {
       return;

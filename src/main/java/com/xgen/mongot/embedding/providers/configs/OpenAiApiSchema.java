@@ -19,13 +19,11 @@ import org.bson.BsonDocument;
 import org.bson.BsonValue;
 
 /**
- * Wire schema for the OpenAI-compatible {@code /v1/embeddings} protocol (OpenAI, Ollama, vLLM, HF
- * TEI, Together, ...). Mirrors {@link VoyageApiSchema} but keeps only the fields shared across the
- * OpenAI-compatible ecosystem.
+ * Wire schema for the OpenAI {@code /v1/embeddings} protocol (OpenAI, Ollama, vLLM, HF TEI,
+ * Together, ...). Like {@link VoyageApiSchema} but only the fields common across these servers.
  *
- * <p>Day-1 supports {@code float} embeddings only. Requests ask for {@code encoding_format: base64}
- * (float32 little-endian); responses that instead return a plain JSON number array are also
- * decoded, since not every server honors {@code encoding_format}.
+ * <p>float only. Requests ask for {@code encoding_format: base64} (float32 little-endian); we also
+ * decode a plain JSON number array, since some servers ignore {@code encoding_format}.
  */
 public class OpenAiApiSchema {
 
@@ -42,8 +40,7 @@ public class OpenAiApiSchema {
               .stringField()
               .optional()
               .withDefault(DEFAULT_ENCODING_FORMAT);
-      // Only forwarded when explicitly configured (Matryoshka models such as text-embedding-3);
-      // most local engines reject an unexpected dimensions field.
+      // only sent when explicitly set; most local engines reject an unexpected dimensions field
       static final Field.Optional<Integer> DIMENSIONS =
           Field.builder("dimensions").intField().optional().noDefault();
     }
@@ -199,10 +196,7 @@ public class OpenAiApiSchema {
           parser.getField(Fields.INDEX).unwrap());
     }
 
-    /**
-     * Decodes an embedding from either the base64 float32 little-endian string (the format we
-     * request) or a plain JSON array of numbers (for servers that ignore {@code encoding_format}).
-     */
+    /** Decode the embedding from base64 float32 (what we request) or a plain JSON number array. */
     public static Vector decodeVectorFromBsonValue(BsonParseContext context, BsonValue value)
         throws BsonParseException {
       if (value.isString()) {

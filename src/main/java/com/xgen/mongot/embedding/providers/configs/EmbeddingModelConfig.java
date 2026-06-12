@@ -255,7 +255,13 @@ public record EmbeddingModelConfig(
             : baseModelConfig.quantization,
         overrideModelConfig.forwardDimensions.isPresent()
             ? overrideModelConfig.forwardDimensions
-            : baseModelConfig.forwardDimensions);
+            : baseModelConfig.forwardDimensions,
+        overrideModelConfig.queryPrefix.isPresent()
+            ? overrideModelConfig.queryPrefix
+            : baseModelConfig.queryPrefix,
+        overrideModelConfig.documentPrefix.isPresent()
+            ? overrideModelConfig.documentPrefix
+            : baseModelConfig.documentPrefix);
   }
 
   @Override
