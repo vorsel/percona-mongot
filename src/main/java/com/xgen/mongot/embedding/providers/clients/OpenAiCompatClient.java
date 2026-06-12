@@ -293,6 +293,17 @@ public class OpenAiCompatClient implements ClientInterface {
       throw new HttpTimeoutException(
           String.format("Timeout exception (HTTP 408). Response body: %s", response.body()));
     }
+    if (statusCode == 401 || statusCode == 403) {
+      // Authentication/authorization failure: a missing/invalid API key or a key without access.
+      // Retrying cannot fix this, so fail fast (non-transient) with an actionable message rather
+      // than retrying until maxRetries is exhausted.
+      this.invalidRequestCounter.increment();
+      throw new EmbeddingProviderNonTransientException(
+          String.format(
+              "Authentication failed (HTTP %d): check the API key and authHeaderName"
+                  + " (Authorization: Bearer vs Azure api-key). Response body: %s",
+              statusCode, response.body()));
+    }
     if (statusCode < 200 || statusCode >= 300) {
       throw new EmbeddingProviderTransientException(
           String.format("Got non OK status from response, status code: %s", statusCode));

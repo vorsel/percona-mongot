@@ -255,6 +255,21 @@ public class OpenAiCompatClientTest {
   }
 
   @Test
+  public void embed_authFailure401or403_throwsNonTransient() throws Exception {
+    // A bad/missing API key must fail fast (non-transient), not be retried as a transient error.
+    for (int statusCode : new int[] {401, 403}) {
+      OpenAiCompatClient client = newClient(openAiModel(Optional.of("bad-key")));
+      OpenAiCompatClient.injectHttpClient(
+          client, mockHttpClient(statusCode, "{\"error\":\"unauthorized\"}"));
+
+      org.junit.Assert.assertThrows(
+          "HTTP " + statusCode + " should be non-transient",
+          EmbeddingProviderNonTransientException.class,
+          () -> client.embed(List.of("hello"), floatContext()));
+    }
+  }
+
+  @Test
   public void embed_timeout408_throwsTransient() throws Exception {
     OpenAiCompatClient client = newClient(openAiModel(Optional.empty()));
     OpenAiCompatClient.injectHttpClient(client, mockHttpClient(408, "{\"error\":\"timeout\"}"));
