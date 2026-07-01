@@ -268,7 +268,10 @@ public final class VectorAutoEmbedFieldSpecification extends VectorFieldSpecific
     // then the static quantization-based fallback.
     VectorSimilarity similarity =
         resolveSimilarity(
-            modelName, userSimilarity, resolvedQuantization, modelConfig.similarityByQuantization);
+            modelName,
+            userSimilarity,
+            resolvedQuantization,
+            modelConfig.getConfiguredSimilarityByQuantization());
 
     return new ResolvedAutoEmbedVectorParams(
         resolvedNumDimensions, similarity, resolvedQuantization);

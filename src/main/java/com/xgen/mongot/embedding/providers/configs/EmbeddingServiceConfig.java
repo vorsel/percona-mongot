@@ -525,6 +525,13 @@ public class EmbeddingServiceConfig implements DocumentEncodable {
 
     /** The configured provider-side quantization, if any. */
     Optional<VectorAutoEmbedQuantization> getConfiguredQuantization();
+
+    /**
+     * Per-quantization default similarity from the model config, if any. An MMS conf-call concept
+     * (Voyage); providers without it (e.g. OPENAI_COMPAT) return empty and fall back to the static
+     * quantization-based default.
+     */
+    Optional<Map<String, String>> getConfiguredSimilarityByQuantization();
   }
 
   public static class VoyageModelConfig implements ModelConfig {
@@ -605,6 +612,11 @@ public class EmbeddingServiceConfig implements DocumentEncodable {
     @Override
     public Optional<VectorAutoEmbedQuantization> getConfiguredQuantization() {
       return this.quantization;
+    }
+
+    @Override
+    public Optional<Map<String, String>> getConfiguredSimilarityByQuantization() {
+      return this.similarityByQuantization;
     }
 
     @Override
@@ -801,6 +813,12 @@ public class EmbeddingServiceConfig implements DocumentEncodable {
     @Override
     public Optional<VectorAutoEmbedQuantization> getConfiguredQuantization() {
       return this.quantization;
+    }
+
+    @Override
+    public Optional<Map<String, String>> getConfiguredSimilarityByQuantization() {
+      // OPENAI_COMPAT has no MMS conf-call, so no per-quantization similarity defaults.
+      return Optional.empty();
     }
 
     public static class Fields {

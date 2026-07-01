@@ -238,7 +238,8 @@ public class OpenAiCompatClientTest {
         "Expected dimensions forwarded when opted in: " + forwardBody,
         forwardBody.contains("\"dimensions\"") && forwardBody.contains("512"));
 
-    // Default (no forwardDimensions): outputDimensions set but NOT forwarded (local engines reject).
+    // default (no forwardDimensions): outputDimensions is set but NOT forwarded
+    // (local engines reject the dimensions field).
     EmbeddingServiceConfig.OpenAiModelConfig noForward =
         new EmbeddingServiceConfig.OpenAiModelConfig(
             Optional.of(768), Optional.of(96), Optional.of(120_000), Optional.empty());
