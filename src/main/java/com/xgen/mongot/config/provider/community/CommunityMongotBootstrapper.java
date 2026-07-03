@@ -556,8 +556,8 @@ public class CommunityMongotBootstrapper {
       SearchCommandsRegister.BootstrapperMetadata bootstrapperMetadata) {
 
     // auto-embedding turns on when the config has an `embedding` section — no Voyage keys needed
-    // anymore (OPENAI_COMPAT works keyless). Voyage models still need query/indexing keys or they're
-    // dropped.
+    // anymore (OPENAI_COMPAT works keyless). Voyage models still need query/indexing keys or
+    // they're dropped.
     if (config.embeddingConfig().isEmpty()) {
       LOG.info(
           "Auto-embedding functionality is disabled. To enable, add an `embedding` section to "
@@ -570,8 +570,8 @@ public class CommunityMongotBootstrapper {
     Optional<EmbeddingServiceManagerConfig.VoyageCredentials> credentials =
         loadVoyageCredentials(config.embeddingConfig());
 
-    // catalog source order: on-disk override (embedding.modelConfigFile) -> file shipped next to the
-    // JAR -> bundled-in-JAR resource
+    // catalog source order: on-disk override (embedding.modelConfigFile) -> file shipped next
+    // to the JAR -> bundled-in-JAR resource
     Optional<Path> modelConfigFile =
         config.embeddingConfig().flatMap(EmbeddingConfig::modelConfigFile);
     Optional<EmbeddingServiceManagerConfig> embeddingConfigOpt =

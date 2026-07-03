@@ -223,20 +223,28 @@ public class OpenAiCompatClientTest {
     String body =
         String.format("{\"data\":[{\"embedding\":\"%s\",\"index\":0}]}", base64Floats(1f, 2f, 3f));
 
-    // forwardDimensions=true with a configured outputDimensions -> `dimensions` in request body.
+    // forwardDimensions=true -> `dimensions` in request body, and the value is the index's
+    // resolved numDimensions from the context (512), NOT the catalog default (1536). one client
+    // serves many indexes, so the per-request dimension must win.
     EmbeddingServiceConfig.OpenAiModelConfig withForward =
         new EmbeddingServiceConfig.OpenAiModelConfig(
-            Optional.of(512), Optional.of(96), Optional.of(120_000), Optional.empty(),
+            Optional.of(1536), Optional.of(96), Optional.of(120_000), Optional.empty(),
             Optional.of(true));
     OpenAiCompatClient forwardClient =
         newClient(openAiModel(Optional.empty(), Optional.empty(), withForward));
     HttpClient forwardHttp = mockHttpClient(200, body);
     OpenAiCompatClient.injectHttpClient(forwardClient, forwardHttp);
-    forwardClient.embed(List.of("hello"), floatContext());
+    EmbeddingRequestContext forwardContext =
+        new EmbeddingRequestContext(
+            "testdb", "testIndex", "testCollection", 512, VectorAutoEmbedQuantization.FLOAT);
+    forwardClient.embed(List.of("hello"), forwardContext);
     String forwardBody = requestBody(captureRequest(forwardHttp));
     assertTrue(
-        "Expected dimensions forwarded when opted in: " + forwardBody,
+        "Expected the context dimension forwarded when opted in: " + forwardBody,
         forwardBody.contains("\"dimensions\"") && forwardBody.contains("512"));
+    assertFalse(
+        "Catalog default must not be forwarded; the per-request dimension wins: " + forwardBody,
+        forwardBody.contains("1536"));
 
     // default (no forwardDimensions): outputDimensions is set but NOT forwarded
     // (local engines reject the dimensions field).

@@ -205,7 +205,8 @@ public class OpenAiApiSchema {
           byte[] decoded = Base64.getDecoder().decode(base64Vector);
           ByteBuffer byteBuffer = ByteBuffer.wrap(decoded).order(ByteOrder.LITTLE_ENDIAN);
           if (byteBuffer.remaining() % Float.BYTES != 0) {
-            return context.handleSemanticError("float embedding byte length is not a multiple of 4");
+            return context.handleSemanticError(
+                "float embedding byte length is not a multiple of 4");
           }
           FloatBuffer floatBuffer = byteBuffer.asFloatBuffer();
           float[] vector = new float[floatBuffer.remaining()];

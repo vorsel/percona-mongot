@@ -715,8 +715,8 @@ public class EmbeddingServiceConfig implements DocumentEncodable {
   }
 
   /**
-   * Model config for {@link EmbeddingProvider#OPENAI_COMPAT}. Like {@link VoyageModelConfig} without
-   * the Voyage-only knobs (truncation, modality).
+   * Model config for {@link EmbeddingProvider#OPENAI_COMPAT}. Like {@link VoyageModelConfig}
+   * without the Voyage-only knobs (truncation, modality).
    */
   public static class OpenAiModelConfig implements ModelConfig {
     public final Optional<Integer> outputDimensions;
@@ -726,8 +726,9 @@ public class EmbeddingServiceConfig implements DocumentEncodable {
     // when true, send outputDimensions as the OpenAI `dimensions` field (Matryoshka shrink on
     // OpenAI/Azure text-embedding-3). default false: local engines reject the field.
     public final Optional<Boolean> forwardDimensions;
-    // prefixes for query vs document inputs. some models need them (nomic-embed-text: "search_query: "
-    // / "search_document: "; e5: "query: " / "passage: "). empty = no prefix. separator is part of the value.
+    // prefixes for query vs document inputs. some models need them (nomic-embed-text:
+    // "search_query: " / "search_document: "; e5: "query: " / "passage: "). empty = no prefix.
+    // separator is part of the value.
     public final Optional<String> queryPrefix;
     public final Optional<String> documentPrefix;
 
@@ -777,12 +778,18 @@ public class EmbeddingServiceConfig implements DocumentEncodable {
       return EmbeddingProvider.OPENAI_COMPAT;
     }
 
-    /** Whether to forward {@code outputDimensions} as the OpenAI {@code dimensions} request field. */
+    /**
+     * Whether to forward {@code outputDimensions} as the OpenAI {@code dimensions} request
+     * field.
+     */
     public boolean shouldForwardDimensions() {
       return this.forwardDimensions.orElse(false);
     }
 
-    /** queryPrefix for the query tier, documentPrefix for the indexing tiers; empty string if unset. */
+    /**
+     * queryPrefix for the query tier, documentPrefix for the indexing tiers; empty string if
+     * unset.
+     */
     public String inputPrefixForTier(ServiceTier tier) {
       Optional<String> prefix =
           tier == ServiceTier.QUERY ? this.queryPrefix : this.documentPrefix;
@@ -791,7 +798,8 @@ public class EmbeddingServiceConfig implements DocumentEncodable {
 
     @Override
     public int getBatchSize() {
-      // OpenAI allows up to 2048 per request, but local engines are usually much smaller — default low
+      // OpenAI allows up to 2048 per request, but local engines are usually much smaller —
+      // default low
       return this.batchSize.orElse(96);
     }
 
@@ -858,7 +866,8 @@ public class EmbeddingServiceConfig implements DocumentEncodable {
 
     private static Optional<VectorAutoEmbedQuantization> parseQuantization(DocumentParser parser)
         throws BsonParseException {
-      Optional<String> quantization = parser.getField(VoyageModelConfig.Fields.QUANTIZATION).unwrap();
+      Optional<String> quantization =
+          parser.getField(VoyageModelConfig.Fields.QUANTIZATION).unwrap();
       if (quantization.isEmpty()) {
         return Optional.empty();
       }
@@ -989,8 +998,8 @@ public class EmbeddingServiceConfig implements DocumentEncodable {
    * Credentials for {@link EmbeddingProvider#OPENAI_COMPAT}. API key is optional: local engines
    * (Ollama, vLLM, TEI) need none; cloud endpoints send it as {@code Authorization: Bearer <key>}.
    *
-   * <p>{@code authHeaderName} defaults to {@code Authorization}; set it to {@code api-key} for Azure
-   * OpenAI, which wants the raw key in an {@code api-key} header.
+   * <p>{@code authHeaderName} defaults to {@code Authorization}; set it to {@code api-key} for
+   * Azure OpenAI, which wants the raw key in an {@code api-key} header.
    */
   public static class OpenAiEmbeddingCredentials implements EmbeddingCredentials {
     public final Optional<String> apiKey;

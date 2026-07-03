@@ -72,9 +72,10 @@ public class OpenAiCompatClient implements ClientInterface {
   private Optional<String> apiKey;
   private String authHeaderName;
 
-  // sent as the OpenAI `dimensions` field, only when forwardDimensions is set (Matryoshka shrink on
-  // OpenAI/Azure). empty for local engines, which reject the field.
-  private Optional<Integer> requestDimensions;
+  // whether to send the OpenAI `dimensions` field (Matryoshka shrink on OpenAI/Azure). off for
+  // local engines, which reject it. the value sent is the index's resolved numDimensions, taken
+  // per request from the context — not the catalog default (one client serves many indexes).
+  private boolean forwardDimensions;
 
   // prepended to each input; query and document tiers differ (queryPrefix/documentPrefix). empty =
   // no prefix.
@@ -105,7 +106,7 @@ public class OpenAiCompatClient implements ClientInterface {
     this.endpoint = URI.create(workloadParams.providerEndpoint().orElse(DEFAULT_ENDPOINT));
     this.apiKey = extractApiKey(workloadParams.credentials());
     this.authHeaderName = extractAuthHeaderName(workloadParams.credentials());
-    this.requestDimensions = extractRequestDimensions(workloadParams.modelConfig());
+    this.forwardDimensions = extractForwardDimensions(workloadParams.modelConfig());
     this.inputPrefix = extractInputPrefix(workloadParams.modelConfig(), tier);
     LOG.debug(
         "Initialized OpenAI-compatible client: model={}, endpoint={}, tier={}, apiKey={},"
@@ -145,7 +146,7 @@ public class OpenAiCompatClient implements ClientInterface {
 
     HttpRequest request;
     try {
-      request = buildRequest(filteredInput);
+      request = buildRequest(filteredInput, context);
     } catch (IllegalArgumentException e) {
       String message = e.getMessage();
       String cleanedMessage = message != null ? redactApiKey(message) : null;
@@ -190,18 +191,15 @@ public class OpenAiCompatClient implements ClientInterface {
     this.endpoint = URI.create(workloadParams.providerEndpoint().orElse(DEFAULT_ENDPOINT));
     this.apiKey = extractApiKey(workloadParams.credentials());
     this.authHeaderName = extractAuthHeaderName(workloadParams.credentials());
-    this.requestDimensions = extractRequestDimensions(workloadParams.modelConfig());
+    this.forwardDimensions = extractForwardDimensions(workloadParams.modelConfig());
     this.inputPrefix = extractInputPrefix(workloadParams.modelConfig(), this.serviceTier);
   }
 
-  /** Dimensions to send, only when forwardDimensions is on and outputDimensions is set. */
-  private static Optional<Integer> extractRequestDimensions(
+  /** Whether this model opts into forwarding the {@code dimensions} field. */
+  private static boolean extractForwardDimensions(
       EmbeddingServiceConfig.ModelConfig modelConfig) {
-    if (modelConfig instanceof EmbeddingServiceConfig.OpenAiModelConfig openAiConfig
-        && openAiConfig.shouldForwardDimensions()) {
-      return openAiConfig.getConfiguredOutputDimensions();
-    }
-    return Optional.empty();
+    return modelConfig instanceof EmbeddingServiceConfig.OpenAiModelConfig openAiConfig
+        && openAiConfig.shouldForwardDimensions();
   }
 
   /** Query/document prefix for this tier, or empty string when none is set. */
@@ -233,7 +231,7 @@ public class OpenAiCompatClient implements ClientInterface {
     return DEFAULT_AUTH_HEADER_NAME;
   }
 
-  private HttpRequest buildRequest(List<String> inputs) {
+  private HttpRequest buildRequest(List<String> inputs, EmbeddingRequestContext context) {
     HttpRequest.Builder requestBuilder =
         HttpRequest.newBuilder()
             .uri(this.endpoint)
@@ -258,19 +256,25 @@ public class OpenAiCompatClient implements ClientInterface {
             ? inputs
             : inputs.stream().map(text -> this.inputPrefix + text).toList();
 
-    // only send `dimensions` when forwardDimensions is on; local engines reject it
+    // only send `dimensions` when forwardDimensions is on; local engines reject it. the value is
+    // the index's resolved numDimensions (per request), so Matryoshka models shrink to the size
+    // the index actually wants — not the catalog default.
+    Optional<Integer> dimensions =
+        this.forwardDimensions ? Optional.of(context.outputDimension()) : Optional.empty();
     BsonDocument body =
         new OpenAiApiSchema.EmbedRequest(
                 this.modelId,
                 prefixedInputs,
                 OpenAiApiSchema.DEFAULT_ENCODING_FORMAT,
-                this.requestDimensions)
+                dimensions)
             .toBson();
 
     return requestBuilder.POST(HttpRequest.BodyPublishers.ofString(body.toJson())).build();
   }
 
-  /** Authorization uses the Bearer scheme; other headers (Azure {@code api-key}) send the raw key. */
+  /**
+   * Authorization uses the Bearer scheme; other headers (Azure {@code api-key}) send the raw key.
+   */
   private String formatAuthHeaderValue(String key) {
     return this.authHeaderName.equalsIgnoreCase(DEFAULT_AUTH_HEADER_NAME) ? "Bearer " + key : key;
   }
@@ -349,7 +353,10 @@ public class OpenAiCompatClient implements ClientInterface {
     return HttpClient.newBuilder().version(HttpClient.Version.HTTP_2).build();
   }
 
-  /** Replace the client periodically so HTTP/2 + TLS connections aren't held forever (DNS, idle limits). */
+  /**
+   * Replace the client periodically so HTTP/2 + TLS connections aren't held forever (DNS, idle
+   * limits).
+   */
   private void renewHttpClientIfStale() {
     long refreshMs = HTTP_CLIENT_REFRESH_INTERVAL.toMillis();
     if (System.currentTimeMillis() - this.httpClientCreatedEpochMs < refreshMs) {
@@ -363,7 +370,10 @@ public class OpenAiCompatClient implements ClientInterface {
     }
   }
 
-  /** True if the error (or a cause) is a TLS/connection failure where a fresh client may help the retry. */
+  /**
+   * True if the error (or a cause) is a TLS/connection failure where a fresh client may help the
+   * retry.
+   */
   private static boolean indicatesConnectionLayerFailure(Throwable throwable) {
     for (Throwable t = throwable; t != null; t = t.getCause()) {
       if (t instanceof SSLException || t instanceof ConnectException) {
@@ -418,7 +428,9 @@ public class OpenAiCompatClient implements ClientInterface {
         .execute(() -> shutdownReplacedHttpClient(previous));
   }
 
-  /** Shut down the replaced client to release its connection pools and threads (JDK 21+ lifecycle). */
+  /**
+   * Shut down the replaced client to release its connection pools and threads (JDK 21+ lifecycle).
+   */
   private void shutdownReplacedHttpClient(HttpClient previous) {
     if (previous == null) {
       return;

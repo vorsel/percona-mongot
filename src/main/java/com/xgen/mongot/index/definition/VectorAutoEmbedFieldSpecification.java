@@ -237,7 +237,8 @@ public final class VectorAutoEmbedFieldSpecification extends VectorFieldSpecific
     // Resolve model config from catalog via the polymorphic ModelConfig interface (not a cast to
     // VoyageModelConfig) so non-Voyage providers (e.g. OPENAI_COMPAT) resolve correctly. When the
     // confcall response doesn't carry embedding model configs the model may not be registered yet;
-    // wrap as BsonParseException so the confcall handler marks the index invalid instead of crashing.
+    // wrap as BsonParseException so the confcall handler marks the index invalid instead of
+    // crashing.
     EmbeddingModelConfig cfg;
     try {
       cfg = EmbeddingModelCatalog.getModelConfig(modelName);

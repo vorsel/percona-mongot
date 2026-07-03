@@ -30,8 +30,8 @@ public record EmbeddingServiceManagerConfig(List<EmbeddingServiceConfig> configs
   private static final Logger LOG = LoggerFactory.getLogger(EmbeddingServiceManagerConfig.class);
   private static final String CONFIG_RESOURCE = "config/community/embedding-service-configs.yml";
 
-  // path to the on-disk catalog; the launcher points this at the file shipped next to the JAR, which
-  // operators can edit and restart to pick up
+  // path to the on-disk catalog; the launcher points this at the file shipped next to the JAR,
+  // which operators can edit and restart to pick up
   static final String MODEL_CONFIG_FILE_PROPERTY = "mongot.embeddingModelConfigFile";
 
   /** Simple holder for Voyage API credentials. */
@@ -84,7 +84,10 @@ public record EmbeddingServiceManagerConfig(List<EmbeddingServiceConfig> configs
     return loadFromResource(credentials);
   }
 
-  /** On-disk catalog path from the override or system property; skips a path that isn't a readable file. */
+  /**
+   * On-disk catalog path from the override or system property; skips a path that isn't a readable
+   * file.
+   */
   private static Optional<Path> resolveExternalCatalogPath(
       Optional<Path> modelConfigFileOverride) {
     Optional<Path> configured =
@@ -122,9 +125,9 @@ public record EmbeddingServiceManagerConfig(List<EmbeddingServiceConfig> configs
       String yaml = Files.readString(path, StandardCharsets.UTF_8);
       return Optional.of(fromBson(YamlCodec.fromYaml(yaml), credentials));
     } catch (Exception e) {
-      // catch broadly: the file is operator-editable, and SnakeYAML throws unchecked YAMLException on
-      // bad YAML on top of the declared IOException/BsonParseException. a typo mustn't crash startup —
-      // fall back to the bundled catalog.
+      // catch broadly: the file is operator-editable, and SnakeYAML throws unchecked
+      // YAMLException on bad YAML on top of the declared IOException/BsonParseException. a typo
+      // mustn't crash startup — fall back to the bundled catalog.
       LOG.error(
           "Failed to load embedding configuration from on-disk catalog {}; falling back to the "
               + "bundled catalog.",
@@ -258,7 +261,8 @@ public record EmbeddingServiceManagerConfig(List<EmbeddingServiceConfig> configs
     if ("VOYAGE".equals(provider)) {
       injectVoyageCredentials(configField, credentials.orElseThrow());
     } else {
-      // other providers carry their own credentials in the YAML; just ensure the doc exists + tagged
+      // other providers carry their own credentials in the YAML; just ensure the doc exists +
+      // tagged
 
       BsonDocument credentialsDoc =
           configField.containsKey("credentials")
